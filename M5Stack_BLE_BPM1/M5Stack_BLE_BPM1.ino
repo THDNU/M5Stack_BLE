@@ -1,11 +1,11 @@
 #include <M5Stack.h>
 #include <Wire.h>
 #include "MAX30105.h"
+#include "heartRate.h"
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
-#include <vector>
 
 // UUID設定
 #define SERVICE_UUID        "12345678-1234-1234-1234-123456789012"
@@ -19,14 +19,13 @@
 MAX30105 particleSensor;
 BLECharacteristic *pCharacteristic;
 
-// データ収集用変数
-std::vector<uint32_t> irData;
-std::vector<uint32_t> redData;
-unsigned long lastTime = 0;
-const int samplingInterval = 1000; // 1秒ごとにサンプリング
-const int collectionTime = 10; // データ収集時間（秒）
-
-bool lastButtonState = false; // 前回のボタンの状態
+// BPM計算用変数
+const byte RATE_SIZE = 4;
+byte rates[RATE_SIZE];
+byte rateSpot = 0;
+long lastBeat = 0;
+float beatsPerMinute;
+int beatAvg = 0;
 
 void setup() {
   M5.begin();
@@ -87,73 +86,50 @@ void setup() {
 
 void loop() {
   M5.update();
-  
-  if (millis() - lastTime > samplingInterval) {
-    lastTime = millis();
-    uint32_t irValue = particleSensor.getIR();
-    uint32_t redValue = particleSensor.getRed();
-    
-    if (irData.size() < collectionTime * (1000 / samplingInterval)) {
-      irData.push_back(irValue);
-      redData.push_back(redValue);
-    } else {
-      irData.erase(irData.begin());
-      redData.erase(redData.begin());
-      irData.push_back(irValue);
-      redData.push_back(redValue);
+
+  long irValue = particleSensor.getIR();
+
+  if (irValue > 7000) {
+    if (checkForBeat(irValue) == true) {
+      long delta = millis() - lastBeat;
+      lastBeat = millis();
+
+      beatsPerMinute = 60 / (delta / 1000.0);
+
+      if (beatsPerMinute < 255 && beatsPerMinute > 20) {
+        rates[rateSpot++] = (byte)beatsPerMinute;
+        rateSpot %= RATE_SIZE;
+
+        beatAvg = 0;
+        for (byte x = 0; x < RATE_SIZE; x++) {
+          beatAvg += rates[x];
+        }
+        beatAvg /= RATE_SIZE;
+      }
+
+      M5.Lcd.fillRect(0, 30, 320, 210, TFT_BLACK);
+      M5.Lcd.setCursor(10, 50);
+      M5.Lcd.setTextSize(2);
+      M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+      M5.Lcd.print("BPM: ");
+      M5.Lcd.println(beatAvg);
+
+      String bpmData = "BPM: " + String(beatAvg);
+      pCharacteristic->setValue(bpmData.c_str());
+      pCharacteristic->notify();
     }
-    
+
     Serial.print("IR Value: ");
     Serial.println(irValue);
-    Serial.print("Red Value: ");
-    Serial.println(redValue);
+    Serial.print("BPM: ");
+    Serial.println(beatAvg);
 
-    // ボタンAの状態をデバッグメッセージで確認
-    if (M5.BtnA.isPressed()) {
-      Serial.println("Button A is pressed");
-      if (!lastButtonState) {
-        Serial.println("Button A pressed, calculating BPM...");
-        calculateBPM();
-      }
-      lastButtonState = true;
-    } else {
-      lastButtonState = false;
-    }
+  } else {
+    beatAvg = 0;
+    M5.Lcd.fillRect(0, 30, 320, 210, TFT_BLACK);
+    M5.Lcd.setCursor(10, 50);
+    M5.Lcd.setTextSize(2);
+    M5.Lcd.setTextColor(TFT_RED, TFT_BLACK);
+    M5.Lcd.println("No Finger Detected");
   }
-}
-
-void calculateBPM() {
-  if (irData.size() < collectionTime * (1000 / samplingInterval)) {
-    Serial.println("Not enough data to calculate BPM");
-    return;
-  }
-
-  Serial.println("Calculating BPM...");
-  
-  // ピーク検出とBPM計算
-  int peakCount = 0;
-  for (int i = 1; i < irData.size() - 1; i++) {
-    if (irData[i] > irData[i-1] && irData[i] > irData[i+1] && irData[i] > 20000) {
-      peakCount++;
-      Serial.print("Peak detected at index ");
-      Serial.println(i);
-    }
-  }
-
-  float bpm = (peakCount / (float)collectionTime) * 60;
-  Serial.print("Peak Count: ");
-  Serial.println(peakCount);
-  Serial.print("BPM: ");
-  Serial.println(bpm);
-
-  M5.Lcd.fillRect(0, 30, 320, 210, TFT_BLACK);
-  M5.Lcd.setCursor(10, 50);
-  M5.Lcd.setTextSize(2);
-  M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Lcd.print("BPM: ");
-  M5.Lcd.println(bpm);
-
-  String bpmData = "BPM: " + String(bpm);
-  pCharacteristic->setValue(bpmData.c_str());
-  pCharacteristic->notify();
 }
